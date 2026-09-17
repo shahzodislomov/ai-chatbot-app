@@ -1,0 +1,119 @@
+.sidebar {
+  width: 250px;
+  background: #2d3748;
+  color: white;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.1);
+}
+
+.sidebar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.sidebar-header h2 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.close-btn {
+  background: none;
+  border: none;
+  color: white;
+  font-size: 1.5rem;
+  cursor: pointer;
+  padding: 0;
+  display: none;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  flex: 1;
+}
+
+.nav-btn {
+  background: #4a5568;
+  border: none;
+  color: white;
+  padding: 0.75rem 1rem;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  font-size: 0.95rem;
+  text-align: left;
+  transition: background 0.2s;
+}
+
+.nav-btn:hover {
+  background: #5a6578;
+}
+
+.nav-btn.danger {
+  background: #f56565;
+}
+
+.nav-btn.danger:hover {
+  background: #e53e3e;
+}
+
+.nav-btn.new-chat {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+
+.nav-btn.new-chat:hover {
+  opacity: 0.9;
+}
+
+.sidebar-footer {
+  border-top: 1px solid #4a5568;
+  padding-top: 1rem;
+  font-size: 0.85rem;
+  color: #cbd5e0;
+}
+
+.sidebar-footer p {
+  margin: 0.5rem 0;
+}
+
+.text-sm {
+  font-size: 0.75rem;
+}
+
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 99;
+}
+
+@media (max-width: 768px) {
+  .sidebar {
+    position: fixed;
+    left: -250px;
+    top: 0;
+    height: 100%;
+    z-index: 100;
+    transition: left 0.3s ease;
+  }
+
+  .sidebar.open {
+    left: 0;
+  }
+
+  .close-btn {
+    display: block;
+  }
+
+  .sidebar-overlay {
+    display: block;
+  }
+}

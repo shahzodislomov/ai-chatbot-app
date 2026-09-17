@@ -1,0 +1,34 @@
+# Environment and credentials
+.env
+.env.*
+!.env.example
+ssl/
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local application data
+*.db
+*.sqlite
+*.sqlite3
+backend/chroma_data/
+backend/.chroma/
+
+# Frontend and build output
+node_modules/
+dist/
+build/
+coverage/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
