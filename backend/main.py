@@ -6,14 +6,15 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import requests
 from sqlalchemy import create_engine, Column, String, Text, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import chromadb
 from chromadb.config import Settings
 
-from config import API_HOST, API_PORT, CORS_ORIGINS, OLLAMA_BASE_URL, OLLAMA_MODEL
+from ollama_client import OllamaServiceError, call_ollama
+
+from config import API_HOST, API_PORT, CORS_ORIGINS, OLLAMA_MODEL
 
 DB_PATH = "./chroma_data"
 
@@ -90,31 +91,6 @@ def get_db() -> Session:
     finally:
         db.close()
 
-def call_ollama(prompt: str, context: str = "") -> str:
-    """Call Ollama LLM with optional context"""
-    full_prompt = f"""You are a helpful AI assistant.
-
-{f'Previous context: {context}' if context else ''}
-
-User: {prompt}
-Assistant:"""
-
-    try:
-        response = requests.post(
-            f"{OLLAMA_BASE_URL}/api/generate",
-            json={
-                "model": OLLAMA_MODEL,
-                "prompt": full_prompt,
-                "stream": False,
-                "temperature": 0.7,
-            },
-            timeout=300,
-        )
-        response.raise_for_status()
-        return response.json()["response"].strip()
-    except Exception as e:
-        return f"Error calling Ollama: {str(e)}"
-
 def retrieve_context(query: str, limit: int = 3) -> str:
     """Retrieve relevant context from memory using ChromaDB"""
     try:
@@ -179,7 +155,14 @@ def send_message(request: ChatMessageRequest, db: Session = None):
     context = retrieve_context(request.message)
 
     # Get response from Ollama
-    response = call_ollama(request.message, context)
+    try:
+        response = call_ollama(request.message, context)
+    except OllamaServiceError as error:
+        db.close()
+        raise HTTPException(
+            status_code=503,
+            detail="AI service is temporarily unavailable",
+        ) from error
 
     # Store messages in database
     user_msg = ChatMessage(

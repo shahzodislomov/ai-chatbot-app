@@ -14,7 +14,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY main.py .
+COPY main.py config.py ollama_client.py ./
 
 # Create data directory
 RUN mkdir -p chroma_data

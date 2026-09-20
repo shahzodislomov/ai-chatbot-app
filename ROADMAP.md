@@ -9,7 +9,7 @@
 
 ## Reliability and privacy
 
-- [ ] Return stable upstream-service errors without exposing internal exception text.
+- [x] Return stable upstream-service errors without exposing internal exception text.
 - [ ] Use dependency-managed database sessions with rollback behavior.
 - [ ] Scope destructive memory deletion to an explicit session or require deliberate global confirmation.
 - [ ] Add request validation limits and structured application logging without prompt content.
