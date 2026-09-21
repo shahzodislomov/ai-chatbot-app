@@ -1,73 +1,20 @@
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import List
-from pathlib import Path
+from typing import Callable, List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, String, Text, DateTime
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-import chromadb
-from chromadb.config import Settings
 
-from ollama_client import OllamaServiceError, call_ollama
-
-from config import API_HOST, API_PORT, CORS_ORIGINS, OLLAMA_MODEL
-
-DB_PATH = "./chroma_data"
-
-# FastAPI Setup
-app = FastAPI(title="AI Chatbot API", version="1.0.0")
-
-# CORS Configuration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=list(CORS_ORIGINS),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Database Setup
-Base = declarative_base()
-DATABASE_URL = "sqlite:///./chatbot.db"
-
-class ChatSession(Base):
-    __tablename__ = "chat_sessions"
-    session_id = Column(String, primary_key=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-class ChatMessage(Base):
-    __tablename__ = "chat_messages"
-    id = Column(String, primary_key=True, index=True)
-    session_id = Column(String, index=True)
-    role = Column(String)
-    content = Column(Text)
-    timestamp = Column(DateTime, default=datetime.utcnow)
-
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-Base.metadata.create_all(bind=engine)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# ChromaDB Setup
-Path(DB_PATH).mkdir(exist_ok=True)
-chroma_settings = Settings(
-    chroma_db_impl="duckdb+parquet",
-    persist_directory=DB_PATH,
-    anonymized_telemetry=False,
-)
-chroma_client = chromadb.Client(chroma_settings)
-
-try:
-    memory_collection = chroma_client.get_collection("chat_memory")
-except Exception:
-    memory_collection = chroma_client.create_collection(
-        name="chat_memory",
-        metadata={"hnsw:space": "cosine"}
-    )
+if __package__:
+    from .config import API_HOST, API_PORT, CORS_ORIGINS, OLLAMA_MODEL
+    from .ollama_client import OllamaServiceError, call_ollama
+    from .storage import ApplicationResources, ChatMessage, ChatSession, initialize_resources
+else:  # Support running ``python backend/main.py``.
+    from config import API_HOST, API_PORT, CORS_ORIGINS, OLLAMA_MODEL
+    from ollama_client import OllamaServiceError, call_ollama
+    from storage import ApplicationResources, ChatMessage, ChatSession, initialize_resources
 
 # Pydantic Models
 class ChatMessageRequest(BaseModel):
@@ -83,18 +30,15 @@ class ChatResponse(BaseModel):
 class ConversationHistory(BaseModel):
     messages: List[dict]
 
-# Utilities
-def get_db() -> Session:
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+def get_resources(request: Request) -> ApplicationResources:
+    """Return resources owned by the running application lifespan."""
+    return request.app.state.resources
 
-def retrieve_context(query: str, limit: int = 3) -> str:
+
+def retrieve_context(resources: ApplicationResources, query: str, limit: int = 3) -> str:
     """Retrieve relevant context from memory using ChromaDB"""
     try:
-        results = memory_collection.query(
+        results = resources.memory_collection.query(
             query_texts=[query],
             n_results=limit,
         )
@@ -105,12 +49,12 @@ def retrieve_context(query: str, limit: int = 3) -> str:
     except Exception:
         return ""
 
-def store_memory(session_id: str, message: str, response: str):
+def store_memory(resources: ApplicationResources, session_id: str, message: str, response: str):
     """Store conversation in vector database for future retrieval"""
     try:
         memory_id = str(uuid.uuid4())
         memory_text = f"Session {session_id}: User said '{message}', Assistant replied '{response}'"
-        memory_collection.add(
+        resources.memory_collection.add(
             ids=[memory_id],
             documents=[memory_text],
             metadatas=[{"session_id": session_id, "timestamp": datetime.utcnow().isoformat()}],
@@ -118,119 +62,136 @@ def store_memory(session_id: str, message: str, response: str):
     except Exception as e:
         print(f"Error storing memory: {e}")
 
-# Routes
-@app.get("/api/health")
-def health_check():
-    """Health check endpoint"""
-    return {"status": "ok", "model": OLLAMA_MODEL}
+def create_app(
+    resource_factory: Callable[[], ApplicationResources] = initialize_resources,
+) -> FastAPI:
+    """Construct the API without opening databases or creating local files."""
 
-@app.post("/api/chat/session", response_model=SessionResponse)
-def create_session(db: Session = None):
-    """Create a new chat session"""
-    db = SessionLocal()
-    session_id = str(uuid.uuid4())
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        resources = resource_factory()
+        application.state.resources = resources
+        try:
+            yield
+        finally:
+            resources.close()
+            del application.state.resources
 
-    session = ChatSession(session_id=session_id)
-    db.add(session)
-    db.commit()
-    db.close()
-
-    return {"session_id": session_id}
-
-@app.post("/api/chat/message", response_model=ChatResponse)
-def send_message(request: ChatMessageRequest, db: Session = None):
-    """Send a message and get a response"""
-    db = SessionLocal()
-
-    # Check if session exists
-    session = db.query(ChatSession).filter(
-        ChatSession.session_id == request.session_id
-    ).first()
-
-    if not session:
-        db.close()
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    # Retrieve context from memory
-    context = retrieve_context(request.message)
-
-    # Get response from Ollama
-    try:
-        response = call_ollama(request.message, context)
-    except OllamaServiceError as error:
-        db.close()
-        raise HTTPException(
-            status_code=503,
-            detail="AI service is temporarily unavailable",
-        ) from error
-
-    # Store messages in database
-    user_msg = ChatMessage(
-        id=str(uuid.uuid4()),
-        session_id=request.session_id,
-        role="user",
-        content=request.message,
-    )
-    assistant_msg = ChatMessage(
-        id=str(uuid.uuid4()),
-        session_id=request.session_id,
-        role="assistant",
-        content=response,
+    application = FastAPI(title="AI Chatbot API", version="1.0.0", lifespan=lifespan)
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(CORS_ORIGINS),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
-    db.add(user_msg)
-    db.add(assistant_msg)
-    db.commit()
-    db.close()
+    @application.get("/api/health")
+    def health_check():
+        """Health check endpoint."""
+        return {"status": "ok", "model": OLLAMA_MODEL}
 
-    # Store in vector database for RAG
-    store_memory(request.session_id, request.message, response)
+    @application.post("/api/chat/session", response_model=SessionResponse)
+    def create_session(http_request: Request):
+        """Create a new chat session."""
+        resources = get_resources(http_request)
+        db = resources.session_factory()
+        try:
+            session_id = str(uuid.uuid4())
+            db.add(ChatSession(session_id=session_id))
+            db.commit()
+            return {"session_id": session_id}
+        finally:
+            db.close()
 
-    return {"response": response}
+    @application.post("/api/chat/message", response_model=ChatResponse)
+    def send_message(request: ChatMessageRequest, http_request: Request):
+        """Send a message and get a response."""
+        resources = get_resources(http_request)
+        db = resources.session_factory()
+        try:
+            session = db.query(ChatSession).filter(
+                ChatSession.session_id == request.session_id
+            ).first()
+            if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
 
-@app.get("/api/chat/history/{session_id}", response_model=ConversationHistory)
-def get_history(session_id: str, db: Session = None):
-    """Get conversation history for a session"""
-    db = SessionLocal()
+            context = retrieve_context(resources, request.message)
+            try:
+                response = call_ollama(request.message, context)
+            except OllamaServiceError as error:
+                raise HTTPException(
+                    status_code=503,
+                    detail="AI service is temporarily unavailable",
+                ) from error
 
-    messages = db.query(ChatMessage).filter(
-        ChatMessage.session_id == session_id
-    ).order_by(ChatMessage.timestamp).all()
+            db.add(
+                ChatMessage(
+                    id=str(uuid.uuid4()),
+                    session_id=request.session_id,
+                    role="user",
+                    content=request.message,
+                )
+            )
+            db.add(
+                ChatMessage(
+                    id=str(uuid.uuid4()),
+                    session_id=request.session_id,
+                    role="assistant",
+                    content=response,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
 
-    db.close()
+        store_memory(resources, request.session_id, request.message, response)
+        return {"response": response}
 
-    history = []
-    for msg in messages:
-        if msg.role == "user":
-            history.append({"user": msg.content})
-        else:
-            history.append({"bot": msg.content})
+    @application.get("/api/chat/history/{session_id}", response_model=ConversationHistory)
+    def get_history(session_id: str, http_request: Request):
+        """Get conversation history for a session."""
+        resources = get_resources(http_request)
+        db = resources.session_factory()
+        try:
+            messages = db.query(ChatMessage).filter(
+                ChatMessage.session_id == session_id
+            ).order_by(ChatMessage.timestamp).all()
+            history = [
+                {"user": message.content} if message.role == "user" else {"bot": message.content}
+                for message in messages
+            ]
+            return {"messages": history}
+        finally:
+            db.close()
 
-    return {"messages": history}
+    @application.post("/api/chat/clear-memory")
+    def clear_memory(http_request: Request):
+        """Clear all memory and conversation history."""
+        resources = get_resources(http_request)
+        db = resources.session_factory()
+        try:
+            db.query(ChatMessage).delete()
+            db.query(ChatSession).delete()
+            db.commit()
+        finally:
+            db.close()
 
-@app.post("/api/chat/clear-memory")
-def clear_memory(db: Session = None):
-    """Clear all memory and conversation history"""
-    db = SessionLocal()
+        try:
+            resources.chroma_client.delete_collection("chat_memory")
+            resources.memory_collection = resources.chroma_client.create_collection(
+                name="chat_memory",
+                metadata={"hnsw:space": "cosine"},
+            )
+        except Exception as error:
+            print(f"Error clearing memory: {error}")
 
-    # Clear database
-    db.query(ChatMessage).delete()
-    db.query(ChatSession).delete()
-    db.commit()
-    db.close()
+        return {"message": "Memory cleared"}
 
-    # Clear vector database
-    try:
-        chroma_client.delete_collection("chat_memory")
-        global memory_collection
-        memory_collection = chroma_client.create_collection(
-            name="chat_memory",
-            metadata={"hnsw:space": "cosine"}
-        )
-    except Exception as e:
-        print(f"Error clearing memory: {e}")
+    return application
 
-    return {"message": "Memory cleared"}
+
+app = create_app()
 
 if __name__ == "__main__":
     import uvicorn

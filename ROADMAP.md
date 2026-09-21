@@ -4,7 +4,7 @@
 
 - [x] Protect local databases, vector data, environments, dependencies, and key material from Git.
 - [x] Replace wildcard credentialed CORS with validated configured origins.
-- [ ] Separate application construction from database and Chroma initialization.
+- [x] Separate application construction from database and Chroma initialization.
 - [ ] Add backend linting, formatting, typing, and test configuration.
 
 ## Reliability and privacy
